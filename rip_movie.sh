@@ -20,6 +20,35 @@ METADATA_HELPER="/opt/ripper/disc_metadata.py"   # adjust this path
 MIN_LENGTH_SECONDS=1800   # 30 minutes - helps skip extras
 
 ########################################
+# Auto-encode config
+########################################
+
+# Threshold in GB — if final file exceeds this, encode
+MAX_SIZE_GB=3
+
+# Enable/disable auto-encoding
+ENABLE_AUTO_ENCODE=1
+
+# Path to HandBrakeCLI
+HANDBRAKE_CLI="/usr/bin/HandBrakeCLI"
+
+# Custom HandBrake quality settings (overrides preset)
+ENCODER="nvenc_h264"
+QUALITY=22
+
+# Audio copy behavior
+AENCODERS="copy:ac3,copy:dts,copy:eac3,copy:truehd,copy:dtshd,av_aac"
+AUDIO_COPY_MASK="ac3,dts,eac3,truehd,dtshd"
+AUDIO_FALLBACK="av_aac"
+
+# Subtitle behavior
+KEEP_ALL_SUBTITLES=1
+
+# Additional features
+INCLUDE_MARKERS=1   # 1 = enable --markers
+
+MAX_SIZE_BYTES=$((MAX_SIZE_GB * 1024 * 1024 * 1024))
+########################################
 
 mkdir -p "$TEMP_DIR" "$OUTPUT_DIR"
 
@@ -112,6 +141,54 @@ FINAL_PATH="${OUTPUT_DIR}/${FINAL_NAME}"
 
 echo "[*] Moving main feature to: $FINAL_PATH"
 mv -v "$MAIN_FILE" "$FINAL_PATH"
+
+########################################
+# Auto-encode step
+########################################
+if [[ "$ENABLE_AUTO_ENCODE" -eq 1 ]]; then
+  if [[ ! -x "$HANDBRAKE_CLI" ]]; then
+    echo "[-] Auto-encode enabled but HandBrakeCLI not found/executable at '$HANDBRAKE_CLI'. Skipping encode." >&2
+  else
+    SIZE_BYTES=$(stat -c%s "$FINAL_PATH")
+    FILE_SIZE_GB_HUMAN=$(awk "BEGIN {printf \"%.2f\", $SIZE_BYTES / (1024*1024*1024)}")
+    echo "[*] Final file size: ${FILE_SIZE_GB_HUMAN} GB (threshold: ${MAX_SIZE_GB} GB)"
+
+    if (( SIZE_BYTES > MAX_SIZE_BYTES )); then
+      echo "[*] File is larger than ${MAX_SIZE_GB}GB. Starting encode with HandBrakeCLI..."
+
+      # These MUST be set before we reference them anywhere (for set -u)
+      ENCODED_PATH="${FINAL_PATH%.mkv}.encoded.mkv"
+      SOURCE_BACKUP="${FINAL_PATH%.mkv}.source.mkv"
+
+      # Run HandBrakeCLI without killing the script on failure
+      if ! "$HANDBRAKE_CLI" \
+            -i "$FINAL_PATH" \
+            -o "$ENCODED_PATH" \
+            --encoder "$ENCODER" \
+            --quality "$QUALITY" \
+            --aencoder "$AENCODERS" \
+            --audio-copy-mask "$AUDIO_COPY_MASK" \
+            --audio-fallback "$AUDIO_FALLBACK" \
+            --all-subtitles \
+            $( [[ "$INCLUDE_MARKERS" -eq 1 ]] && echo "--markers" ); then
+        echo "[-] Encoding failed; leaving original file in place." >&2
+      else
+        if [[ -f "$ENCODED_PATH" ]]; then
+          echo "[*] Encode complete: $ENCODED_PATH"
+          echo "[*] Renaming original to: $SOURCE_BACKUP"
+          mv -v "$FINAL_PATH" "$SOURCE_BACKUP"
+          echo "[*] Moving encoded file into final name: $FINAL_PATH"
+          mv -v "$ENCODED_PATH" "$FINAL_PATH"
+        else
+          echo "[-] Encoding reported success but encoded file not found. Keeping original." >&2
+        fi
+      fi
+    else
+      echo "[*] File is <= ${MAX_SIZE_GB}GB. Skipping auto-encode."
+    fi
+  fi
+fi
+########################################
 
 echo "[*] Leaving any extra titles in $TEMP_DIR (trailers, bonus content, etc.)"
 echo "[+] Done."
